@@ -1,0 +1,26 @@
+{
+  "name": "molkky-scoreboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm:server\" \"npm:client\"",
+    "server": "node server/index.js",
+    "client": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "start": "NODE_ENV=production node server/index.js"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "vite": "latest",
+    "typescript": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "express": "latest",
+    "socket.io": "latest",
+    "socket.io-client": "latest",
+    "nanoid": "latest",
+    "concurrently": "latest"
+  },
+  "devDependencies": {}
+}
