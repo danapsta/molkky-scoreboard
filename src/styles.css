@@ -111,3 +111,23 @@ button.mini { padding: .45rem .65rem; border-radius: 10px; font-size: .8rem; }
   .score-shell { max-width: 900px; }
   .score-pin-grid { grid-template-columns: repeat(6, 1fr); }
 }
+
+/* In-game roster management */
+input { font: inherit; color: #e2e8f0; background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(255,255,255,0.15); border-radius: 10px; padding: .5rem .65rem; min-width: 0; }
+.check-row { display: flex; align-items: center; gap: .6rem; margin-top: .9rem; color: #cbd5e1; font-weight: 700; }
+.check-row input { width: 1.2rem; height: 1.2rem; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: .8rem; margin-bottom: .8rem; flex-wrap: wrap; }
+.card-head h2 { margin: 0; }
+button.mini.on { background: linear-gradient(135deg, #38bdf8, #6366f1); color: #0b1120; }
+.row-tools { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; }
+.edit-form, .inline-add { display: flex; flex-wrap: wrap; align-items: end; gap: .45rem; }
+.edit-form label { display: grid; gap: .2rem; font-size: .75rem; color: #94a3b8; font-weight: 800; }
+.edit-form input { width: 5.5rem; }
+.inline-add input { width: 9rem; padding: .4rem .55rem; }
+.member-chip { display: inline-flex !important; align-items: center; gap: .3rem; padding: .25rem .3rem .25rem .6rem; border-radius: 999px; background: rgba(59,130,246,.18); border: 1px solid rgba(147,197,253,.25); font-size: .85rem; font-weight: 700; }
+.chip-x { padding: 0 .45rem; border-radius: 999px; font-size: 1rem; line-height: 1.4; }
+.add-form { margin-top: 1rem; padding-top: .8rem; border-top: 1px solid rgba(255,255,255,.1); }
+.add-form h3 { margin: 0 0 .6rem; font-size: 1rem; }
+.add-fields { display: flex; flex-wrap: wrap; gap: .5rem; }
+.add-fields input { flex: 1 1 8rem; padding: .7rem .8rem; }
+.add-fields button { padding: .7rem 1.1rem; }

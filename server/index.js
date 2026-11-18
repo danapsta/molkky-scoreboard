@@ -82,7 +82,8 @@ function defaultState() {
     settings: {
       rotateStatsSeconds: 8,
       showMisses: true,
-      showNeededToWin: true
+      showNeededToWin: true,
+      unlimitedMisses: false
     }
   };
 }
@@ -105,10 +106,24 @@ function snapshotForUndo() {
   if (state.undoStack.length > MAX_UNDO) state.undoStack.shift();
 }
 
+function isTeamMode() { return state.mode === 'team' || state.mode === 'tournament'; }
 function participantRows() {
-  if (state.mode === 'team' || state.mode === 'tournament') return state.teams;
+  if (isTeamMode()) return state.teams;
   return state.players;
 }
+function missesUnlimited(entity) { return !!state.settings?.unlimitedMisses || entity?.missEliminates === false; }
+function eliminatedByMisses(entity) {
+  return !!entity?.eliminated && !entity.manuallyExcluded && !entity.overtimeExcluded && (entity.misses || 0) >= state.maxMisses;
+}
+function firstActiveIndexFrom(rows, start) {
+  const total = rows.length;
+  for (let offset = 0; offset < total; offset++) {
+    const index = (start + offset) % total;
+    if (!rows[index].eliminated) return index;
+  }
+  return 0;
+}
+function logEvent(message) { state.eventLog.push({ id: nanoid(10), at: now(), message }); state.eventLog = state.eventLog.slice(-500); }
 function activePlayers() { return state.players.filter(p => !p.eliminated); }
 function activeTeams() { return state.teams.filter(t => !t.eliminated); }
 function activeRows() { return participantRows().filter(p => !p.eliminated); }
@@ -263,7 +278,7 @@ function buildStats() {
   const missLeader = [...rows].sort((a, b) => (b.misses || 0) - (a.misses || 0))[0] || null;
   const biggestThrow = [...throws].sort((a, b) => b.points - a.points)[0] || null;
   const clutch = ranked.filter(p => state.targetScore - p.score > 0 && state.targetScore - p.score <= 12);
-  const danger = rows.filter(p => !p.eliminated && p.misses >= Math.max(1, state.maxMisses - 1));
+  const danger = rows.filter(p => !p.eliminated && !missesUnlimited(p) && p.misses >= Math.max(1, state.maxMisses - 1));
   const hot = [...rows]
     .filter(p => !p.eliminated)
     .map(p => {
@@ -401,6 +416,49 @@ function maybeFinishChampionshipRound(entity, wonThisThrow) {
     champ.turnsRemainingInRound = Math.max(0, (champ.turnsRemainingInRound || 0) - 1);
   }
 
+  return resolveChampionshipRoundIfDone();
+}
+
+function championshipFinishingRound() {
+  const phase = state.championship?.phase;
+  return state.mode === 'championship' && (phase === 'finish-round' || phase === 'overtime-finish-round');
+}
+
+// The players still owed a throw in a finish-the-round phase are the next
+// `turnsRemainingInRound` active players, starting with the current one.
+function upcomingChampionshipThrowerIds() {
+  if (!championshipFinishingRound()) return [];
+  const needed = state.championship.turnsRemainingInRound || 0;
+  const ids = [];
+  const total = state.players.length;
+  for (let offset = 0; offset < total && ids.length < needed; offset++) {
+    const p = state.players[(state.currentPlayerIndex + offset) % total];
+    if (p && !p.eliminated) ids.push(p.id);
+  }
+  return ids;
+}
+
+// Call BEFORE a player is removed or eliminated outside of a normal throw.
+function championshipForgetPlayer(id) {
+  if (state.mode !== 'championship' || !state.championship) return;
+  const champ = state.championship;
+  if (upcomingChampionshipThrowerIds().includes(id)) champ.turnsRemainingInRound = Math.max(0, (champ.turnsRemainingInRound || 0) - 1);
+  dropExact50(id);
+}
+
+function dropExact50(id) {
+  const champ = state.championship;
+  if (!champ?.exact50ThisRound?.includes(id)) return;
+  champ.exact50ThisRound = champ.exact50ThisRound.filter(x => x !== id);
+  if (!champ.exact50ThisRound.length && championshipFinishingRound()) {
+    champ.phase = champ.phase === 'overtime-finish-round' ? 'overtime' : 'normal';
+    champ.turnsRemainingInRound = 0;
+  }
+}
+
+function resolveChampionshipRoundIfDone() {
+  const champ = state.championship;
+  if (state.mode !== 'championship' || !champ) return false;
   if ((champ.phase === 'finish-round' || champ.phase === 'overtime-finish-round') && champ.turnsRemainingInRound === 0) {
     const contenders = (champ.exact50ThisRound || []).map(id => state.players.find(p => p.id === id)).filter(p => p && !p.eliminated);
     if (contenders.length === 1) {
@@ -457,6 +515,7 @@ app.post('/api/new-game', (req, res) => {
   state = defaultState();
   state.status = 'playing';
   state.mode = mode;
+  state.settings.unlimitedMisses = !!req.body?.unlimitedMisses;
 
   if (mode === 'individual') {
     const names = uniqueClean(req.body?.players);
@@ -553,8 +612,7 @@ app.post('/api/throw', (req, res) => {
 
   if (wasMiss) {
     misses += 1;
-    const missEliminates = state.mode === 'championship' ? entity.missEliminates !== false : true;
-    if (missEliminates && misses >= state.maxMisses) eliminated = true;
+    if (!missesUnlimited(entity) && misses >= state.maxMisses) eliminated = true;
   } else {
     misses = 0;
     const attempted = entity.score + points;
@@ -608,18 +666,7 @@ app.post('/api/throw', (req, res) => {
     if (state.mode === 'team' || state.mode === 'tournament') entity.roundsWon = (entity.roundsWon || 0) + 1;
     archiveFinishedGame();
   } else if (!handledByChampionship) {
-    const count = (state.mode === 'team' || state.mode === 'tournament') ? activeTeams().length : activePlayers().length;
-    if (count <= 1) {
-      const survivor = (state.mode === 'team' || state.mode === 'tournament') ? activeTeams()[0] : activePlayers()[0];
-      state.status = 'finished';
-      state.winnerId = survivor?.id || null;
-      state.winnerType = (state.mode === 'team' || state.mode === 'tournament') ? 'team' : 'player';
-      if (survivor && (state.mode === 'team' || state.mode === 'tournament')) survivor.roundsWon = (survivor.roundsWon || 0) + 1;
-      if (state.mode === 'championship' && survivor && !state.championship?.overallWinnerId) state.championship.overallWinnerId = survivor.id;
-      archiveFinishedGame();
-    } else {
-      advanceTurn();
-    }
+    if (!finishIfOneLeft()) advanceTurn();
   }
 
   saveState();
@@ -627,15 +674,212 @@ app.post('/api/throw', (req, res) => {
   return apiResponse(res);
 });
 
+function finishIfOneLeft() {
+  if (state.status !== 'playing') return false;
+  const active = isTeamMode() ? activeTeams() : activePlayers();
+  if (active.length > 1) return false;
+  const survivor = active[0];
+  state.status = 'finished';
+  state.winnerId = survivor?.id || null;
+  state.winnerType = isTeamMode() ? 'team' : 'player';
+  if (survivor && isTeamMode()) survivor.roundsWon = (survivor.roundsWon || 0) + 1;
+  if (state.mode === 'championship' && survivor && state.championship && !state.championship.overallWinnerId) state.championship.overallWinnerId = survivor.id;
+  archiveFinishedGame();
+  return true;
+}
+
+function commit(res) {
+  saveState();
+  emitState(io);
+  return apiResponse(res);
+}
+
+function requirePlaying(res) {
+  if (state.status === 'playing') return true;
+  res.status(400).json({ error: 'No active game.' });
+  return false;
+}
+
+function makePlayer(name, extra = {}) {
+  return { id: nanoid(10), name, score: 0, misses: 0, eliminated: false, throws: 0, busts: 0, totalPointsScored: 0, ...extra };
+}
+
+function makeChampionshipPlayer(name, rawAge, order) {
+  const age = rawAge !== '' && rawAge != null && Number.isFinite(Number(rawAge)) ? Number(rawAge) : 15;
+  const bracket = getAgeBracket(age);
+  return makePlayer(name, {
+    age,
+    category: bracket.id,
+    categoryLabel: bracket.label,
+    categoryRange: bracket.range,
+    closerLine: bracket.closerLine,
+    missEliminates: bracket.missEliminates,
+    manuallyExcluded: false,
+    order
+  });
+}
+
+function makeTeam(name, players) {
+  return { id: nanoid(10), name, players, throwerIndex: 0, score: 0, misses: 0, eliminated: false, throws: 0, busts: 0, totalPointsScored: 0, roundsWon: 0 };
+}
+
+// Add a player (individual/championship) or a team (team/tournament) mid-game.
+app.post('/api/participants', (req, res) => {
+  if (!requirePlaying(res)) return;
+  const name = normalizeName(req.body?.name);
+  if (!name) return res.status(400).json({ error: 'Enter a name.' });
+  const rows = participantRows();
+  if (rows.some(p => canonicalName(p.name) === canonicalName(name))) return res.status(400).json({ error: `${name} is already in this game.` });
+  if (state.mode === 'championship' && state.championship?.phase !== 'normal') {
+    return res.status(400).json({ error: 'Players can only join a championship before anyone hits exact 50. Wait for the round/overtime to finish.' });
+  }
+
+  snapshotForUndo();
+  if (isTeamMode()) {
+    const members = uniqueClean(req.body?.players || []);
+    state.teams.push(makeTeam(name, members.length ? members : [name]));
+    logEvent(`${name} joined the game.`);
+  } else if (state.mode === 'championship') {
+    const p = makeChampionshipPlayer(name, req.body?.age, state.players.length);
+    state.players.push(p);
+    logEvent(`${name} (${p.categoryLabel}) joined the championship.`);
+  } else {
+    state.players.push(makePlayer(name));
+    logEvent(`${name} joined the game.`);
+  }
+  return commit(res);
+});
+
+// Remove a player/team from the current game entirely.
+app.delete('/api/participants/:id', (req, res) => {
+  if (!requirePlaying(res)) return;
+  const rows = participantRows();
+  const index = rows.findIndex(p => p.id === req.params.id);
+  if (index < 0) return res.status(404).json({ error: 'Not found.' });
+  const target = rows[index];
+  const remainingActive = rows.filter(p => !p.eliminated && p.id !== target.id).length;
+  if (remainingActive < 1 || (!target.eliminated && remainingActive < 2)) {
+    return res.status(400).json({ error: `Removing ${target.name} would leave fewer than two ${isTeamMode() ? 'teams' : 'players'} in the game. Add someone first, or reset the game.` });
+  }
+
+  snapshotForUndo();
+  championshipForgetPlayer(target.id);
+
+  const key = isTeamMode() ? 'currentTeamIndex' : 'currentPlayerIndex';
+  const current = state[key];
+  rows.splice(index, 1);
+  if (index < current) state[key] = current - 1;
+  else if (index === current) state[key] = firstActiveIndexFrom(rows, index % rows.length);
+  if (state.mode === 'championship' && state.championship && typeof state.championship.firstExact50Index === 'number' && index < state.championship.firstExact50Index) {
+    state.championship.firstExact50Index -= 1;
+  }
+
+  logEvent(`${target.name} was removed from the game.`);
+  if (!resolveChampionshipRoundIfDone()) finishIfOneLeft();
+  return commit(res);
+});
+
+// Manually set a participant's score (and optionally misses).
+app.post('/api/participants/:id/score', (req, res) => {
+  if (!requirePlaying(res)) return;
+  const entity = participantRows().find(p => p.id === req.params.id);
+  if (!entity) return res.status(404).json({ error: 'Not found.' });
+  const score = Number(req.body?.score);
+  if (!Number.isInteger(score) || score < 0 || score >= state.targetScore) {
+    return res.status(400).json({ error: `Score must be a whole number from 0 to ${state.targetScore - 1}. Record a throw to finish on ${state.targetScore}.` });
+  }
+  let misses = entity.misses || 0;
+  if (req.body?.misses !== undefined && req.body?.misses !== '') {
+    misses = Number(req.body.misses);
+    if (!Number.isInteger(misses) || misses < 0) return res.status(400).json({ error: 'Misses must be a whole number of 0 or more.' });
+  }
+
+  snapshotForUndo();
+  const before = entity.score;
+  const wasMissElim = eliminatedByMisses(entity);
+  entity.score = score;
+  entity.misses = misses;
+  // Lowering misses below the limit revives a player who was knocked out by misses.
+  if (wasMissElim && misses < state.maxMisses && !(state.mode === 'championship' && state.championship?.phase !== 'normal')) entity.eliminated = false;
+  if (state.mode === 'championship') dropExact50(entity.id);
+  logEvent(`Score corrected: ${entity.name} ${before} → ${score}${req.body?.misses !== undefined ? ` (misses ${misses})` : ''}.`);
+  resolveChampionshipRoundIfDone();
+  return commit(res);
+});
+
+// Toggle unlimited misses for one participant.
+app.post('/api/participants/:id/unlimited-misses', (req, res) => {
+  if (!requirePlaying(res)) return;
+  const entity = participantRows().find(p => p.id === req.params.id);
+  if (!entity) return res.status(404).json({ error: 'Not found.' });
+  snapshotForUndo();
+  const enabled = req.body?.enabled !== undefined ? !!req.body.enabled : entity.missEliminates !== false;
+  entity.missEliminates = !enabled;
+  if (enabled) revivePlayersEliminatedByMisses([entity]);
+  logEvent(`${entity.name}: unlimited misses ${enabled ? 'on' : 'off'}.`);
+  return commit(res);
+});
+
+// Toggle unlimited misses for everyone in the game.
+app.post('/api/unlimited-misses', (req, res) => {
+  snapshotForUndo();
+  const enabled = !!req.body?.enabled;
+  state.settings = { ...state.settings, unlimitedMisses: enabled };
+  if (enabled && state.status === 'playing') revivePlayersEliminatedByMisses(participantRows());
+  logEvent(`Unlimited misses for everyone ${enabled ? 'on' : 'off'}.`);
+  return commit(res);
+});
+
+function revivePlayersEliminatedByMisses(rows) {
+  // Reviving mid finish-the-round would add an unexpected thrower, so wait for normal play.
+  if (state.mode === 'championship' && state.championship?.phase !== 'normal') return;
+  for (const p of rows) if (eliminatedByMisses(p)) p.eliminated = false;
+}
+
+// Add a thrower to an existing team.
+app.post('/api/teams/:id/members', (req, res) => {
+  if (!requirePlaying(res)) return;
+  if (!isTeamMode()) return res.status(400).json({ error: 'Not a team game.' });
+  const team = state.teams.find(t => t.id === req.params.id);
+  if (!team) return res.status(404).json({ error: 'Team not found.' });
+  const name = normalizeName(req.body?.name);
+  if (!name) return res.status(400).json({ error: 'Enter a name.' });
+  if (team.players.some(n => canonicalName(n) === canonicalName(name))) return res.status(400).json({ error: `${name} is already on ${team.name}.` });
+  snapshotForUndo();
+  team.players.push(name);
+  logEvent(`${name} joined ${team.name}.`);
+  return commit(res);
+});
+
+// Remove a thrower from a team's rotation.
+app.delete('/api/teams/:id/members/:index', (req, res) => {
+  if (!requirePlaying(res)) return;
+  if (!isTeamMode()) return res.status(400).json({ error: 'Not a team game.' });
+  const team = state.teams.find(t => t.id === req.params.id);
+  if (!team) return res.status(404).json({ error: 'Team not found.' });
+  const index = Number(req.params.index);
+  if (!Number.isInteger(index) || index < 0 || index >= team.players.length) return res.status(404).json({ error: 'Team member not found.' });
+  if (team.players.length <= 1) return res.status(400).json({ error: `${team.name} needs at least one thrower. Remove the whole team instead.` });
+  snapshotForUndo();
+  const thrower = (team.throwerIndex || 0) % team.players.length;
+  const [removed] = team.players.splice(index, 1);
+  team.throwerIndex = (index < thrower ? thrower - 1 : thrower) % team.players.length;
+  logEvent(`${removed} left ${team.name}.`);
+  return commit(res);
+});
+
 app.post('/api/player/:id/exclude', (req, res) => {
   const player = state.players.find(p => p.id === req.params.id);
   if (!player) return res.status(404).json({ error: 'Player not found.' });
   snapshotForUndo();
+  championshipForgetPlayer(player.id);
   player.eliminated = true;
   player.manuallyExcluded = true;
   player.excludedReason = normalizeName(req.body?.reason) || 'Manual exclude';
   if (state.currentPlayerIndex >= 0 && state.players[state.currentPlayerIndex]?.id === player.id) advanceTurn();
-  if (state.status === 'playing' && state.mode === 'championship' && activePlayers().length <= 1) {
+  if (resolveChampionshipRoundIfDone()) {
+    // round resolved by removing the last pending thrower
+  } else if (state.status === 'playing' && state.mode === 'championship' && activePlayers().length <= 1) {
     const survivor = activePlayers()[0];
     state.status = 'finished';
     state.winnerId = survivor?.id || null;
@@ -652,7 +896,7 @@ app.post('/api/next-round', (req, res) => {
   if (!(state.mode === 'team' || state.mode === 'tournament') || !state.tournament) return res.status(400).json({ error: 'No team/tournament game is active.' });
   const teams = state.teams.map(t => ({ ...t, score: 0, misses: 0, eliminated: false, throws: 0, busts: 0, totalPointsScored: 0, throwerIndex: t.throwerIndex || 0 }));
   const tournament = { ...state.tournament, roundNumber: (state.tournament.roundNumber || 1) + 1 };
-  state = { ...defaultState(), mode: 'tournament', status: 'playing', teams, tournament };
+  state = { ...defaultState(), mode: 'tournament', status: 'playing', teams, tournament, settings: { ...defaultState().settings, ...state.settings } };
   saveState();
   emitState(io);
   return apiResponse(res);
@@ -691,7 +935,7 @@ app.post('/api/history/clear', (req, res) => {
 const distPath = path.join(ROOT, 'dist');
 if (process.env.NODE_ENV === 'production' && fs.existsSync(distPath)) {
   app.use(express.static(distPath));
-  app.get('*', (req, res) => res.sendFile(path.join(distPath, 'index.html')));
+  app.get(/.*/, (req, res) => res.sendFile(path.join(distPath, 'index.html')));
 }
 
 io.on('connection', socket => {

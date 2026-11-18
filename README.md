@@ -35,6 +35,17 @@ Display: http://localhost:5173/display
   - Finished games are archived to `data/history.json`
   - History panel appears in the admin dashboard
 
+## In-game roster management (all modes)
+
+The **Scores** card on the admin screen lets you change the game while it is running:
+
+- **Add players mid-game** — individual/championship players (with age for championship) or whole teams join at 0 points at the end of the order. In team/tournament games you can also add or remove throwers from a team's rotation. (Championship joins are paused while a finish-the-round or overtime phase is in progress.)
+- **Remove players** — takes a player/team out of the rotation entirely. The turn passes on correctly, and the app refuses if it would leave fewer than two in the game.
+- **Edit score** — set any participant's score (0-49) and miss count on the fly. Lowering misses below the limit revives a player who was knocked out by misses.
+- **Unlimited misses** — toggle per player/team, or for everyone at once (also available as a checkbox when starting a game). Turning it on revives anyone who was eliminated only by misses.
+
+Every change is logged and can be reverted with **Undo**.
+
 ## Important upgrade note
 
 If you have an old corrupted state file from the previous recursive-history bug, the new server tries to sanitize it. If the app still hangs, delete the current state file:

@@ -14,6 +14,10 @@ const BRACKET_LABELS = {
 };
 
 
+function isUnlimited(state, p) { return !!state.settings?.unlimitedMisses || p?.missEliminates === false; }
+function missLimit(state, p) { return isUnlimited(state, p) ? '∞' : state.maxMisses; }
+function isTeamMode(state) { return state.mode === 'team' || state.mode === 'tournament'; }
+
 function canonicalName(name) {
   return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
@@ -188,7 +192,7 @@ function DisplayView({ state, stats, history }) {
       </> : <>
         <div className="eyebrow">Current Turn {state.mode !== 'individual' ? `· ${state.mode}` : ''}</div>
         <h1><DisplayName state={state} stats={stats} /></h1>
-        {stats.currentEntity && <p>{stats.currentEntity.name} score {stats.currentEntity.score} · needs {state.targetScore - stats.currentEntity.score} · misses {stats.currentEntity.misses}/{stats.currentEntity.missEliminates === false ? '∞' : state.maxMisses}</p>}
+        {stats.currentEntity && <p>{stats.currentEntity.name} score {stats.currentEntity.score} · needs {state.targetScore - stats.currentEntity.score} · misses {stats.currentEntity.misses}/{missLimit(state, stats.currentEntity)}</p>}
         {state.mode === 'championship' && <p className="hint">{state.championship?.name} {state.championship?.year} · {stats.championship?.phase}</p>}
       </>}
     </section>
@@ -219,6 +223,7 @@ function SetupPanel({ setError }) {
   const [championshipName, setChampionshipName] = useState('Yearly Championship');
   const [championshipYear, setChampionshipYear] = useState(String(new Date().getFullYear()));
   const [championshipPlayers, setChampionshipPlayers] = useState('Ben, 39\nSarah, 36\nMaddie, 8\nLeo, 4\nNana, 67');
+  const [unlimitedMisses, setUnlimitedMisses] = useState(false);
 
   function parseTeams(text) {
     return text.split('\n').map(line => line.trim()).filter(Boolean).map((line, index) => {
@@ -238,11 +243,11 @@ function SetupPanel({ setError }) {
     try {
       if (mode === 'individual') {
         const players = names.split('\n').map(n => n.trim()).filter(Boolean);
-        await api('/api/new-game', { method: 'POST', body: JSON.stringify({ mode, players }) });
+        await api('/api/new-game', { method: 'POST', body: JSON.stringify({ mode, players, unlimitedMisses }) });
       } else if (mode === 'championship') {
-        await api('/api/new-game', { method: 'POST', body: JSON.stringify({ mode, championshipName, championshipYear: Number(championshipYear), players: parseChampionshipPlayers(championshipPlayers) }) });
+        await api('/api/new-game', { method: 'POST', body: JSON.stringify({ mode, championshipName, championshipYear: Number(championshipYear), players: parseChampionshipPlayers(championshipPlayers), unlimitedMisses }) });
       } else {
-        await api('/api/new-game', { method: 'POST', body: JSON.stringify({ mode, tournamentName, teams: parseTeams(teamsText) }) });
+        await api('/api/new-game', { method: 'POST', body: JSON.stringify({ mode, tournamentName, teams: parseTeams(teamsText), unlimitedMisses }) });
       }
     } catch (err) { setError(err.message); }
   }
@@ -256,6 +261,7 @@ function SetupPanel({ setError }) {
         <button className={mode === 'tournament' ? 'selected' : ''} onClick={() => setMode('tournament')}>Tournament</button>
         <button className={mode === 'championship' ? 'selected' : ''} onClick={() => setMode('championship')}>Championship</button>
       </div>
+      <label className="check-row"><input type="checkbox" checked={unlimitedMisses} onChange={e => setUnlimitedMisses(e.target.checked)} /> Unlimited misses for everyone (nobody is eliminated for missing)</label>
     </section>
 
     {mode === 'individual' ? <section className="admin-card">
@@ -347,7 +353,7 @@ function ScoreView({ state, stats, setError }) {
     <section className="score-header">
       <div className="eyebrow">{state.mode === 'team' || state.mode === 'tournament' ? 'Current Thrower' : 'Current Player'}</div>
       <h1>{state.mode === 'team' || state.mode === 'tournament' ? `${current?.name || ''} · ${stats.currentTeam?.name || ''}` : current?.name}</h1>
-      {entity && <p>Score {entity.score} · needs {state.targetScore - entity.score} · misses {entity.misses}/{entity.missEliminates === false ? '∞' : state.maxMisses}</p>}
+      {entity && <p>Score {entity.score} · needs {state.targetScore - entity.score} · misses {entity.misses}/{missLimit(state, entity)}</p>}
     </section>
 
     <div className="score-pin-grid">
@@ -360,6 +366,120 @@ function ScoreView({ state, stats, setError }) {
     </div>
     <button onClick={undo} className="undo-btn">Undo Last Throw</button>
   </main>;
+}
+
+function RosterRow({ state, p, entity, setError, excludePlayer }) {
+  const [editing, setEditing] = useState(false);
+  const [score, setScore] = useState(String(p.score));
+  const [misses, setMisses] = useState(String(p.misses || 0));
+  const [newMember, setNewMember] = useState('');
+  const playing = state.status === 'playing';
+  const teamMode = isTeamMode(state);
+  const globalUnlimited = !!state.settings?.unlimitedMisses;
+  const unlimited = isUnlimited(state, p);
+
+  async function call(path, method, body) {
+    try { await api(path, { method, body: body ? JSON.stringify(body) : undefined }); return true; }
+    catch (err) { setError(err.message); return false; }
+  }
+  function startEdit() { setScore(String(p.score)); setMisses(String(p.misses || 0)); setEditing(true); }
+  async function saveEdit(e) {
+    e.preventDefault();
+    if (await call(`/api/participants/${p.id}/score`, 'POST', { score: Number(score), misses: Number(misses) })) setEditing(false);
+  }
+  async function remove() {
+    if (!confirm(`Remove ${p.name} from this game? Their throws stay in the log, but they leave the rotation.`)) return;
+    await call(`/api/participants/${p.id}`, 'DELETE');
+  }
+  async function toggleUnlimited() { await call(`/api/participants/${p.id}/unlimited-misses`, 'POST', { enabled: p.missEliminates !== false }); }
+  async function addMember(e) {
+    e.preventDefault();
+    if (!newMember.trim()) return;
+    if (await call(`/api/teams/${p.id}/members`, 'POST', { name: newMember })) setNewMember('');
+  }
+  async function removeMember(index, name) {
+    if (!confirm(`Remove ${name} from ${p.name}'s rotation?`)) return;
+    await call(`/api/teams/${p.id}/members/${index}`, 'DELETE');
+  }
+
+  return <div className={`compact-row ${p.id === entity?.id ? 'active' : ''} ${p.eliminated ? 'dead' : ''}`}>
+    <span>{p.name}{p.players && <small>Next: {p.players[p.throwerIndex % p.players.length]}</small>}{p.categoryLabel && <small>{p.categoryLabel} · age {p.age}{p.closerLine ? ' · closer line' : ''}</small>}</span>
+    <strong>{p.score}</strong>
+    <em>{p.eliminated ? (p.manuallyExcluded ? 'Excluded' : 'Eliminated') : `${p.misses}/${missLimit(state, p)} misses${p.roundsWon ? ` · ${p.roundsWon}W` : ''}`}</em>
+    {state.mode === 'championship' && !p.eliminated && playing ? <button className="mini danger" onClick={() => excludePlayer(p.id)}>Exclude</button> : <span />}
+
+    {playing && <div className="row-tools">
+      {editing ? <form className="edit-form" onSubmit={saveEdit}>
+        <label>Score<input type="number" inputMode="numeric" min="0" max={state.targetScore - 1} value={score} onChange={e => setScore(e.target.value)} autoFocus /></label>
+        <label>Misses<input type="number" inputMode="numeric" min="0" value={misses} onChange={e => setMisses(e.target.value)} /></label>
+        <button type="submit" className="mini primary">Save</button>
+        <button type="button" className="mini" onClick={() => setEditing(false)}>Cancel</button>
+      </form> : <>
+        <button className="mini" onClick={startEdit}>Edit score</button>
+        <button className={`mini ${unlimited ? 'on' : ''}`} onClick={toggleUnlimited} disabled={globalUnlimited} title={globalUnlimited ? 'Unlimited misses is on for everyone' : ''}>∞ misses {unlimited ? 'on' : 'off'}</button>
+        <button className="mini danger" onClick={remove}>Remove</button>
+      </>}
+    </div>}
+
+    {teamMode && playing && <div className="row-tools">
+      {p.players.map((name, i) => <span className="member-chip" key={`${name}-${i}`}>{name}<button className="chip-x" aria-label={`Remove ${name}`} onClick={() => removeMember(i, name)} disabled={p.players.length <= 1}>×</button></span>)}
+      <form className="inline-add" onSubmit={addMember}>
+        <input value={newMember} onChange={e => setNewMember(e.target.value)} placeholder="Add thrower" />
+        <button type="submit" className="mini">Add</button>
+      </form>
+    </div>}
+  </div>;
+}
+
+function AddParticipantForm({ state, setError }) {
+  const [name, setName] = useState('');
+  const [age, setAge] = useState('');
+  const [members, setMembers] = useState('');
+  const teamMode = isTeamMode(state);
+  const blocked = state.mode === 'championship' && state.championship?.phase !== 'normal';
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!name.trim()) return;
+    const body = { name };
+    if (state.mode === 'championship') body.age = age;
+    if (teamMode) body.players = members.split(',').map(x => x.trim()).filter(Boolean);
+    try {
+      await api('/api/participants', { method: 'POST', body: JSON.stringify(body) });
+      setName(''); setAge(''); setMembers('');
+    } catch (err) { setError(err.message); }
+  }
+
+  return <form className="add-form" onSubmit={submit}>
+    <h3>Add {teamMode ? 'a team' : 'a player'} mid-game</h3>
+    <div className="add-fields">
+      <input value={name} onChange={e => setName(e.target.value)} placeholder={teamMode ? 'Team name' : 'Player name'} />
+      {state.mode === 'championship' && <input type="number" inputMode="numeric" min="0" value={age} onChange={e => setAge(e.target.value)} placeholder="Age" />}
+      {teamMode && <input value={members} onChange={e => setMembers(e.target.value)} placeholder="Throwers, comma separated" />}
+      <button type="submit" className="primary" disabled={blocked}>Add</button>
+    </div>
+    <p className="hint">{blocked ? 'New players can join once the finish-the-round / overtime phase is over.' : `Joins at 0 points at the end of the ${teamMode ? 'team' : 'throwing'} order.`}</p>
+  </form>;
+}
+
+function RosterPanel({ state, entity, setError, excludePlayer }) {
+  const rows = isTeamMode(state) ? state.teams : state.players;
+  const playing = state.status === 'playing';
+  const globalUnlimited = !!state.settings?.unlimitedMisses;
+  async function toggleGlobal() {
+    try { await api('/api/unlimited-misses', { method: 'POST', body: JSON.stringify({ enabled: !globalUnlimited }) }); }
+    catch (err) { setError(err.message); }
+  }
+  return <section className="admin-card">
+    <div className="card-head">
+      <h2>Scores</h2>
+      {playing && <button className={`mini ${globalUnlimited ? 'on' : ''}`} onClick={toggleGlobal}>∞ misses for everyone: {globalUnlimited ? 'on' : 'off'}</button>}
+    </div>
+    <div className="compact-list">
+      {rows.map(p => <RosterRow key={p.id} state={state} p={p} entity={entity} setError={setError} excludePlayer={excludePlayer} />)}
+    </div>
+    {playing && <AddParticipantForm state={state} setError={setError} />}
+  </section>;
 }
 
 function AdminView({ state, stats, history, setError }) {
@@ -390,7 +510,7 @@ function AdminView({ state, stats, history, setError }) {
     <section className="admin-card current-card">
       <div className="eyebrow">Current {state.mode === 'team' || state.mode === 'tournament' ? 'Thrower' : 'Player'}</div>
       <h1>{state.mode === 'team' || state.mode === 'tournament' ? `${current?.name || ''} · ${stats.currentTeam?.name || ''}` : current?.name}</h1>
-      {entity && <p>{entity.name}: score {entity.score}; needs {state.targetScore - entity.score}; misses {entity.misses}/{entity.missEliminates === false ? '∞' : state.maxMisses}</p>}
+      {entity && <p>{entity.name}: score {entity.score}; needs {state.targetScore - entity.score}; misses {entity.misses}/{missLimit(state, entity)}</p>}
       {state.mode !== 'individual' && state.mode !== 'championship' && state.tournament && <p className="hint">{state.tournament.name} · Round {state.tournament.roundNumber}</p>}
       {state.mode === 'championship' && <p className="hint">{state.championship?.name} {state.championship?.year} · {stats.championship?.phase} · {stats.championship?.turnsRemainingInRound || 0} round throw(s) pending</p>}
       <div className="admin-actions">
@@ -408,17 +528,7 @@ function AdminView({ state, stats, history, setError }) {
       <p className="hint">One pin = that pin number. Multiple pins = count of pins. Empty/miss = 0.</p>
     </section>
 
-    <section className="admin-card">
-      <h2>Scores</h2>
-      <div className="compact-list">
-        {rows.map(p => <div className={`compact-row ${p.id === entity?.id ? 'active' : ''} ${p.eliminated ? 'dead' : ''}`} key={p.id}>
-          <span>{p.name}{p.players && <small>Next: {p.players[p.throwerIndex % p.players.length]}</small>}{p.categoryLabel && <small>{p.categoryLabel} · age {p.age}{p.closerLine ? ' · closer line' : ''}</small>}</span>
-          <strong>{p.score}</strong>
-          <em>{p.eliminated ? (p.manuallyExcluded ? 'Excluded' : 'Eliminated') : `${p.misses}/${p.missEliminates === false ? '∞' : state.maxMisses} misses${p.roundsWon ? ` · ${p.roundsWon}W` : ''}`}</em>
-          {state.mode === 'championship' && !p.eliminated && <button className="mini danger" onClick={() => excludePlayer(p.id)}>Exclude</button>}
-        </div>)}
-      </div>
-    </section>
+    <RosterPanel state={state} entity={entity} setError={setError} excludePlayer={excludePlayer} />
 
     {state.mode === 'championship' && <section className="admin-card">
       <h2>Current Category Leaders</h2>
